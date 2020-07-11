@@ -134,9 +134,8 @@
 #include "frame_extn_intf.h"
 #include "smomo_interface.h"
 #include "layer_extn_intf.h"
-#endif
-
 composer::ComposerExtnLib composer::ComposerExtnLib::g_composer_ext_lib_;
+#endif
 
 namespace android {
 
@@ -292,6 +291,7 @@ std::string decodeDisplayColorSetting(DisplayColorSetting displayColorSetting) {
 
 SurfaceFlingerBE::SurfaceFlingerBE() : mHwcServiceName(getHwcServiceName()) {}
 
+#ifdef QCOM_UM_FAMILY
 bool LayerExtWrapper::Init() {
     mLayerExtLibHandle = dlopen(LAYER_EXTN_LIBRARY_NAME, RTLD_NOW);
     if (!mLayerExtLibHandle) {
@@ -334,7 +334,14 @@ int LayerExtWrapper::getLayerClass(const std::string &name) {
   return mInst->GetLayerClass(name);
 }
 
+void LayerExtWrapper::updateLayerState(const std::vector<std::string>&layers, int numLayers) {
+    mInst->UpdateLayerState(layers, numLayers);
+}
+
+#endif
+
 LayerExtWrapper::~LayerExtWrapper() {
+#ifdef QCOM_UM_FAMILY
     if (mInst) {
         mLayerExtDestroyFunc(mInst);
     }
@@ -342,6 +349,7 @@ LayerExtWrapper::~LayerExtWrapper() {
     if (mLayerExtLibHandle) {
       dlclose(mLayerExtLibHandle);
     }
+#endif
 }
 
 SurfaceFlinger::SurfaceFlinger(Factory& factory, SkipInitializationTag)
@@ -509,7 +517,13 @@ SurfaceFlinger::SurfaceFlinger(Factory& factory) : SurfaceFlinger(factory, SkipI
     if (int_value) {
         mUseSmoMo = true;
     }
+    property_get("vendor.display.split_layer_ext", value, "0");
+    int_value = atoi(value);
+    if (int_value) {
+        mSplitLayerExt = true;
+    }
 #else
+    mSplitLayerExt = false;
     mUseSmoMo = false;
     mUseLayerExt = false;
 #endif
@@ -528,8 +542,11 @@ SurfaceFlinger::SurfaceFlinger(Factory& factory) : SurfaceFlinger(factory, SkipI
         }
         if (!mDolphinFuncsEnabled) dlclose(mDolphinHandle);
     }
+#else
+    mDolphinHandle = nullptr;
+#endif
 
-
+#ifdef QCOM_UM_FAMILY
     mFrameExtnLibHandle = dlopen(EXTENSION_LIBRARY_NAME, RTLD_NOW);
     if (!mFrameExtnLibHandle) {
         ALOGE("Unable to open libframeextension.so: %s.", dlerror());
@@ -934,7 +951,7 @@ void SurfaceFlinger::init() {
 
 #ifdef QCOM_UM_FAMILY
 
-    if (mUseLayerExt) {
+    if (mUseLayerExt || mSplitLayerExt) {
         mLayerExt = LayerExtWrapper::Create();
         if (!mLayerExt) {
             ALOGE("Failed to create layer extension");
@@ -1877,6 +1894,7 @@ void SurfaceFlinger::onRefreshReceived(int sequenceId, hwc2_display_t /*hwcDispl
 }
 
 void SurfaceFlinger::updateFrameScheduler() NO_THREAD_SAFETY_ANALYSIS {
+#ifdef QCOM_UM_FAMILY
     if (!mFrameSchedulerExtnIntf) {
         return;
     }
@@ -1907,6 +1925,9 @@ void SurfaceFlinger::updateFrameScheduler() NO_THREAD_SAFETY_ANALYSIS {
             mVsyncModulator.onRefreshRateChangeCompleted();
         }
     }
+#else
+    return;
+#endif
 }
 
 void SurfaceFlinger::setVsyncEnabled(bool enabled) {
@@ -4199,11 +4220,17 @@ bool SurfaceFlinger::doComposeSurfaces(const sp<DisplayDevice>& displayDevice,
     ALOGV("Rendering client layers");
     bool firstLayer = true;
     Region clearRegion = Region::INVALID_REGION;
+#ifdef QCOM_UM_FAMILY
+    std::vector<std::string> layers;
+#endif
     for (auto& layer : displayDevice->getVisibleLayersSortedByZ()) {
         const Region viewportRegion(displayState.viewport);
         const Region clip(viewportRegion.intersect(layer->visibleRegion));
         ALOGV("Layer: %s", layer->getName().string());
         ALOGV("  Composition type: %s", toString(layer->getCompositionType(displayDevice)).c_str());
+#ifdef QCOM_UM_FAMILY
+        layers.push_back(layer->getName().string());
+#endif
         if (!clip.isEmpty()) {
             switch (layer->getCompositionType(displayDevice)) {
                 case Hwc2::IComposerClient::Composition::CURSOR:
@@ -4257,6 +4284,12 @@ bool SurfaceFlinger::doComposeSurfaces(const sp<DisplayDevice>& displayDevice,
         }
         firstLayer = false;
     }
+
+#ifdef QCOM_UM_FAMILY
+    if (mSplitLayerExt && mLayerExt) {
+        mLayerExt->updateLayerState(layers, mNumLayers);
+    }
+#endif
 
     // Perform some cleanup steps if we used client composition.
     if (hasClientComposition) {
